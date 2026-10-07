@@ -130,16 +130,17 @@ app.get('/', async (req, res) => {
   header b{display:block;font-size:20px} header span{display:block;font-size:14px;opacity:.85;margin-top:2px}
   main{max-width:760px;margin:0 auto;padding:16px}
   form{display:flex;gap:8px} input{flex:1;min-width:0;font-size:18px;padding:0 12px;min-height:48px;border:1px solid #999;border-radius:8px}
-  button{font-size:18px;padding:0 20px;min-height:48px;border:0;border-radius:8px;background:#0b7a4b;color:#fff}
+  button{font-size:18px;padding:0 20px;min-height:48px;border:0;border-radius:8px;background:#0b7a4b;color:#fff;cursor:pointer}
   table{width:100%;border-collapse:collapse;margin-top:16px} th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}
   tbody{border-top:2px solid #0b7a4b} td{vertical-align:top} td.name{font-weight:600}
   td.items{white-space:pre-line;font-size:15px} a{color:#06c} #msg{margin-top:16px;color:#666}
-  td.ems button{font:600 16px monospace;min-height:44px;padding:0 12px;background:#fff;color:#0b7a4b;border:1px solid #0b7a4b;border-radius:8px;cursor:pointer}
+  td.ems button{font:600 16px monospace;min-height:44px;padding:0 12px;background:#fff;color:#0b7a4b;border:1px solid #0b7a4b;border-radius:8px}
   td.ems button::after{content:' ›'}
   dialog{width:min(520px,calc(100vw - 32px));border:0;border-radius:12px;padding:0;box-shadow:0 10px 40px rgba(0,0,0,.3)}
   dialog::backdrop{background:rgba(0,0,0,.45)}
   .dh{display:flex;justify-content:space-between;align-items:center;padding:4px 4px 4px 16px;background:#0b7a4b;color:#fff;font:600 17px monospace}
-  .dh button{background:none;font-size:22px;padding:0 14px}
+  .dh button{background:none;font-size:22px;padding:0 14px} #trk-x{margin-left:auto}
+  #trk-copy{display:grid;place-items:center;padding:0 10px} #trk-copy .i-check,#trk-copy.done .i-copy{display:none} #trk-copy.done .i-check{display:block}
   #trk-body{padding:16px;max-height:60vh;overflow:auto} #trk-body p{margin:0;color:#555}
   ol.tl{list-style:none;margin:0;padding:0}
   ol.tl li{position:relative;border-left:2px solid #cfe3d7;padding:0 0 16px 18px;margin-left:6px}
@@ -167,7 +168,7 @@ app.get('/', async (req, res) => {
 <table id="t" hidden><thead><tr><th>ชื่อ-สกุล</th><th>รายการของ</th><th>เลข EMS</th></tr></thead></table>
 </main>
 <dialog id="trk" aria-labelledby="trk-h">
-  <div class="dh"><span id="trk-h"></span><button id="trk-x" aria-label="ปิด">✕</button></div>
+  <div class="dh"><span id="trk-h"></span><button id="trk-copy" aria-label="คัดลอกเลข EMS" title="คัดลอกเลข EMS"><!-- lucide copy (ISC) --><svg class="i-copy" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><!-- lucide check (ISC) --><svg class="i-check" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg></button><button id="trk-x" aria-label="ปิด">✕</button></div>
   <div id="trk-body"></div>
   <div class="df"><span id="trk-at"></span><a id="trk-web" target="_blank" rel="noopener">ดูบนเว็บไปรษณีย์ไทย ↗</a></div>
 </dialog>
@@ -208,6 +209,17 @@ f.onsubmit = async (e) => {
 t.onclick = (e) => { const b = e.target.closest('button[data-ems]'); if (b) showTrack(b.dataset.ems) }
 document.getElementById('trk-x').onclick = () => trk.close()
 trk.onclick = (e) => { if (e.target === trk) trk.close() } // กดพื้นหลังปิด
+const copyBtn = document.getElementById('trk-copy')
+copyBtn.onclick = async () => {
+  const ems = document.getElementById('trk-h').textContent
+  try { await navigator.clipboard.writeText(ems) } catch {
+    // LINE in-app browser บางรุ่นไม่ให้ใช้ Clipboard API — ใส่ textarea ใน dialog (นอก dialog เป็น inert)
+    const ta = document.createElement('textarea'); ta.value = ems; trk.append(ta); ta.select()
+    document.execCommand('copy'); ta.remove()
+  }
+  copyBtn.classList.add('done'); copyBtn.setAttribute('aria-label', 'คัดลอกแล้ว')
+  setTimeout(() => { copyBtn.classList.remove('done'); copyBtn.setAttribute('aria-label', 'คัดลอกเลข EMS') }, 1500)
+}
 const say = (text) => { const p = document.createElement('p'); p.textContent = text; return p }
 const fmt = (d) => new Date(d).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })
 async function showTrack(ems) {
