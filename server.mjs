@@ -115,7 +115,9 @@ f.onsubmit = async (e) => {
       td.textContent = its.map((x) => 'BIB ' + x.bib + ' · ' + x.size + ' · ' + x.event).join('\\n')
       const cell = tr.insertCell(); cell.className = 'ems'
       const a = document.createElement('a')
-      a.href = 'https://track.thailandpost.co.th/?trackNumber=' + ems; a.target = '_blank'; a.textContent = ems
+      // openExternalBrowser=1: LINE in-app browser เปิดใน Safari/Chrome แทน; browser อื่นไม่สนพารามิเตอร์นี้
+      a.href = 'https://track.thailandpost.co.th/?trackNumber=' + ems + '&openExternalBrowser=1'
+      a.target = '_blank'; a.rel = 'noopener'; a.textContent = ems
       cell.append(a)
     }
   }
@@ -125,7 +127,18 @@ f.onsubmit = async (e) => {
 })
 
 const port = process.env.PORT || 3001
-app.listen(port, (err) => {
+const server = app.listen(port, (err) => {
   if (err) throw err
   console.log(`http://localhost:${port}`)
 })
+
+// pm2 restart/stop ส่ง SIGINT — ต้องปิด PGlite ให้เรียบร้อย ไม่งั้น pgdata เสียได้ (เจอจริงตอน kill -9)
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.once(sig, () => {
+    server.close(async () => {
+      await db.close()
+      process.exit(0)
+    })
+    server.closeAllConnections() // ไม่รอ keep-alive — pm2 จะ SIGKILL หลัง 1.6 วิ
+  })
+}
