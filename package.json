@@ -1,0 +1,16 @@
+{
+  "name": "run_post_tracking",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "import": "node import.mjs",
+    "verify": "node verify.mjs",
+    "search": "node search.mjs",
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.3.0",
+    "express": "^5.1.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  }
+}

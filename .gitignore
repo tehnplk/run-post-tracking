@@ -1,0 +1,8 @@
+node_modules/
+pgdata/
+.playwright-cli/
+# ข้อมูลส่วนบุคคล (ชื่อ เบอร์ ที่อยู่) — ส่งขึ้นเซิร์ฟเวอร์ด้วย pscp ห้ามขึ้น GitHub
+*.xlsx
+# มีชื่อจริง/เลข EMS ในเทสต์
+e2e.js
+verify.mjs
