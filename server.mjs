@@ -2,10 +2,51 @@ import express from 'express'
 import { createHash, randomBytes } from 'node:crypto'
 import { PGlite } from '@electric-sql/pglite'
 
+try { process.loadEnvFile() } catch {} // .env: TH_POST_TOKEN = Token Key จาก track.thailandpost.co.th → สำหรับนักพัฒนา
+
 const db = new PGlite('pgdata')
-// แยกจาก schema.sql เพื่อให้ import ใหม่ไม่ล้างยอดผู้เข้าชม
+// แยกจาก schema.sql เพื่อให้ import ใหม่ไม่ล้างยอดผู้เข้าชม/สถานะที่เช็คแล้ว
 await db.exec(`CREATE TABLE IF NOT EXISTS visit (key text NOT NULL, at timestamptz NOT NULL DEFAULT now());
-               CREATE INDEX IF NOT EXISTS visit_key_at_idx ON visit (key, at)`)
+               CREATE INDEX IF NOT EXISTS visit_key_at_idx ON visit (key, at);
+               CREATE TABLE IF NOT EXISTS track_cache (ems text PRIMARY KEY, events jsonb NOT NULL, checked_at timestamptz NOT NULL DEFAULT now())`)
+
+// Thailand Post Track API — โควตา 1,000 "เลข"/วัน (ไม่ใช่ครั้ง) จึงเช็คเฉพาะเลขที่ user กด, จำผล 1 ชม.,
+// สถานะ 501 นำจ่ายสำเร็จ / 901 โอนเงินแล้ว = จบ ไม่เช็คอีก
+const THPOST = 'https://trackapi.thailandpost.co.th/post/api/v1'
+const FINAL = new Set(['501', '901'])
+const FRESH_MS = 60 * 60 * 1000
+let apiToken = null // { token, expire } — token อายุ 1 เดือน
+const thpost = async (path, auth, body) => {
+  const r = await fetch(THPOST + path, {
+    method: 'POST',
+    headers: { Authorization: 'Token ' + auth, 'Content-Type': 'application/json' },
+    body: body && JSON.stringify(body),
+    signal: AbortSignal.timeout(10000),
+  })
+  if (!r.ok) throw Object.assign(new Error(`thpost ${path} HTTP ${r.status}`), { status: r.status })
+  return r.json()
+}
+const getToken = async () => {
+  if (apiToken && apiToken.expire > Date.now() + 24 * 3600 * 1000) return apiToken.token
+  const key = process.env.TH_POST_TOKEN?.trim()
+  if (!key) throw new Error('TH_POST_TOKEN not set')
+  const j = await thpost('/authenticate/token', key)
+  apiToken = { token: j.token, expire: Date.parse(j.expire.replace(' ', 'T')) }
+  return j.token
+}
+const fetchEvents = async (ems, retry = true) => {
+  try {
+    const j = await thpost('/track', await getToken(), { status: 'all', language: 'TH', barcode: [ems] })
+    if (!j.status) throw new Error('thpost: ' + j.message) // เช่น "blocked, your request over quota!!"
+    // ไม่เก็บ/ไม่ส่ง receiver_name, signature, เบอร์เจ้าหน้าที่ — ค้นชื่อคนอื่นได้
+    return (j.response.items[ems] ?? []).map((e) => ({
+      status: e.status, description: e.status_description, date: e.status_date, detail: e.statusDetail, location: e.location,
+    }))
+  } catch (err) {
+    if (err.status === 401 && retry) { apiToken = null; return fetchEvents(ems, false) } // Token Key ถูกสร้างใหม่
+    throw err
+  }
+}
 const app = express()
 app.set('trust proxy', 'loopback') // อยู่หลัง nginx บนเครื่องเดียวกัน → req.ip เป็น IP จริงของผู้ใช้
 // เก็บแค่ hash(ip+UA) ไม่เก็บ IP ดิบ; salt สุ่มต่อการรัน → restart แล้วนับคนเดิมใหม่ได้ 1 ครั้ง
@@ -43,6 +84,29 @@ app.get('/api/search', async (req, res) => {
   }))
 })
 
+app.get('/api/track/:ems', async (req, res) => {
+  // เฉพาะเลขในรายการของเรา — กันคนนอกใช้โควตาเช็คเลขอะไรก็ได้
+  const { rows: [p] } = await db.query(
+    'SELECT c.events, c.checked_at FROM parcel p LEFT JOIN track_cache c USING (ems) WHERE p.ems = $1',
+    [req.params.ems]
+  )
+  if (!p) return res.status(404).json({ error: 'ไม่พบเลขพัสดุนี้ในรายการ' })
+  const done = p.events?.some((e) => FINAL.has(e.status))
+  if (done || (p.checked_at && Date.now() - p.checked_at < FRESH_MS)) return res.json({ events: p.events, checked_at: p.checked_at })
+  try {
+    const events = await fetchEvents(req.params.ems)
+    const { rows: [c] } = await db.query(
+      `INSERT INTO track_cache (ems, events) VALUES ($1, $2::jsonb)
+       ON CONFLICT (ems) DO UPDATE SET events = EXCLUDED.events, checked_at = now() RETURNING checked_at`,
+      [req.params.ems, JSON.stringify(events)]
+    )
+    res.json({ events, checked_at: c.checked_at })
+  } catch (err) {
+    console.error('track', req.params.ems, err.message)
+    res.json({ events: p.events ?? null, checked_at: p.checked_at ?? null, stale: true }) // ใช้ผลเก่า (ถ้ามี)
+  }
+})
+
 app.get('/', async (req, res) => {
   // นับ 1 ครั้งต่อ ip+UA ต่อ 30 นาที — refresh รัวๆ ไม่เพิ่มยอด
   // ponytail: ไม่ได้กัน bot ที่สุ่ม UA ทุก request; ถ้าโดนจริงค่อยใส่ rate limit
@@ -69,7 +133,20 @@ app.get('/', async (req, res) => {
   button{font-size:18px;padding:0 20px;min-height:48px;border:0;border-radius:8px;background:#0b7a4b;color:#fff}
   table{width:100%;border-collapse:collapse;margin-top:16px} th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}
   tbody{border-top:2px solid #0b7a4b} td{vertical-align:top} td.name{font-weight:600}
-  td.items{white-space:pre-line;font-size:15px} td.ems{font-family:monospace;font-size:16px} a{color:#06c} #msg{margin-top:16px;color:#666}
+  td.items{white-space:pre-line;font-size:15px} a{color:#06c} #msg{margin-top:16px;color:#666}
+  td.ems button{font:600 16px monospace;min-height:44px;padding:0 12px;background:#fff;color:#0b7a4b;border:1px solid #0b7a4b;border-radius:8px;cursor:pointer}
+  td.ems button::after{content:' ›'}
+  dialog{width:min(520px,calc(100vw - 32px));border:0;border-radius:12px;padding:0;box-shadow:0 10px 40px rgba(0,0,0,.3)}
+  dialog::backdrop{background:rgba(0,0,0,.45)}
+  .dh{display:flex;justify-content:space-between;align-items:center;padding:4px 4px 4px 16px;background:#0b7a4b;color:#fff;font:600 17px monospace}
+  .dh button{background:none;font-size:22px;padding:0 14px}
+  #trk-body{padding:16px;max-height:60vh;overflow:auto} #trk-body p{margin:0;color:#555}
+  ol.tl{list-style:none;margin:0;padding:0}
+  ol.tl li{position:relative;border-left:2px solid #cfe3d7;padding:0 0 16px 18px;margin-left:6px}
+  ol.tl li::before{content:'';position:absolute;left:-7px;top:3px;width:12px;height:12px;border-radius:50%;background:#cfe3d7}
+  ol.tl li:first-child::before{background:#0b7a4b} ol.tl li:last-child{border-color:transparent}
+  ol.tl b{display:block} ol.tl small{display:block;color:#666;font-size:13px}
+  .df{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:12px 16px;border-top:1px solid #eee;font-size:13px;color:#888}
   footer{max-width:760px;margin:24px auto 0;padding:16px;color:#888;font-size:13px;text-align:center;border-top:1px solid #eee}
   /* มือถือ: ตาราง → การ์ด 1 ใบต่อคน, ปุ่ม EMS เต็มความกว้างกดง่าย */
   @media (max-width:600px){
@@ -80,9 +157,7 @@ app.get('/', async (req, res) => {
     td.name{font-size:18px;padding-top:12px}
     tr.parcel+tr.parcel{border-top:1px dashed #cfe3d7;margin-top:6px;padding-top:6px}
     td.items::before{content:'รายการของ';display:block;font-size:12px;color:#666}
-    td.ems{padding-bottom:12px}
-    td.ems a{display:block;text-align:center;padding:12px;border:1px solid #0b7a4b;border-radius:8px;text-decoration:none;color:#0b7a4b;font-weight:600}
-    td.ems a::after{content:' ↗'}
+    td.ems{padding-bottom:12px} td.ems button{display:block;width:100%;min-height:48px}
   }
 </style></head><body>
 <header><div><b>สำนักงานสาธารณสุขจังหวัดพิษณุโลก</b><span>รายการจัดส่งพัสดุ เดิน วิ่ง ปั่น ป้องกันอัมพาต ครั้งที่ 12</span></div></header>
@@ -91,14 +166,21 @@ app.get('/', async (req, res) => {
 <div id="msg"></div>
 <table id="t" hidden><thead><tr><th>ชื่อ-สกุล</th><th>รายการของ</th><th>เลข EMS</th></tr></thead></table>
 </main>
+<dialog id="trk" aria-labelledby="trk-h">
+  <div class="dh"><span id="trk-h"></span><button id="trk-x" aria-label="ปิด">✕</button></div>
+  <div id="trk-body"></div>
+  <div class="df"><span id="trk-at"></span><a id="trk-web" target="_blank" rel="noopener">ดูบนเว็บไปรษณีย์ไทย ↗</a></div>
+</dialog>
 <footer id="visits">ผู้เข้าชมวันนี้ ${v.today.toLocaleString()} · ทั้งหมด ${v.total.toLocaleString()}</footer>
 <script>
+const clearResults = () => { for (const b of [...t.tBodies]) b.remove(); t.hidden = true; msg.textContent = '' }
+q.oninput = () => { if (!q.value) clearResults() } // ปุ่ม ✕ ของช่อง search / ลบจนว่าง
 f.onsubmit = async (e) => {
   e.preventDefault()
   const r = await fetch('/api/search?q=' + encodeURIComponent(q.value))
   const data = await r.json()
-  for (const b of [...t.tBodies]) b.remove()
-  t.hidden = true
+  clearResults()
+  if (!q.value) return // กด ✕ ระหว่างรอผล
   if (!r.ok) return msg.textContent = data.error
   msg.textContent = data.length ? 'พบ ' + new Set(data.map((x) => x.ems)).size + ' รายการส่งของ' + (data.length === 50 ? ' (แสดง 50 แรก พิมพ์ให้ละเอียดขึ้น)' : '') : 'ไม่พบชื่อนี้'
   // 1 tbody ต่อชื่อ, 1 แถวต่อกล่อง (EMS), ชื่อ rowspan ครอบทุกกล่องของคนนั้น
@@ -114,14 +196,44 @@ f.onsubmit = async (e) => {
       const td = tr.insertCell(); td.className = 'items'
       td.textContent = its.map((x) => 'BIB ' + x.bib + ' · ' + x.size + ' · ' + x.event).join('\\n')
       const cell = tr.insertCell(); cell.className = 'ems'
-      const a = document.createElement('a')
-      // openExternalBrowser=1: LINE in-app browser เปิดใน Safari/Chrome แทน; browser อื่นไม่สนพารามิเตอร์นี้
-      a.href = 'https://track.thailandpost.co.th/?trackNumber=' + ems + '&openExternalBrowser=1'
-      a.target = '_blank'; a.rel = 'noopener'; a.textContent = ems
-      cell.append(a)
+      const b = document.createElement('button')
+      b.dataset.ems = ems; b.textContent = ems; b.setAttribute('aria-haspopup', 'dialog')
+      cell.append(b)
     }
   }
   t.hidden = !data.length
+}
+
+// modal สถานะพัสดุ — ข้อมูลจาก /api/track (เซิร์ฟเวอร์ถาม API ไปรษณีย์ให้ + จำผล)
+t.onclick = (e) => { const b = e.target.closest('button[data-ems]'); if (b) showTrack(b.dataset.ems) }
+document.getElementById('trk-x').onclick = () => trk.close()
+trk.onclick = (e) => { if (e.target === trk) trk.close() } // กดพื้นหลังปิด
+const say = (text) => { const p = document.createElement('p'); p.textContent = text; return p }
+const fmt = (d) => new Date(d).toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' })
+async function showTrack(ems) {
+  const body = document.getElementById('trk-body'), at = document.getElementById('trk-at')
+  document.getElementById('trk-h').textContent = ems
+  // openExternalBrowser=1: LINE in-app browser เปิดใน Safari/Chrome แทน; browser อื่นไม่สนพารามิเตอร์นี้
+  document.getElementById('trk-web').href = 'https://track.thailandpost.co.th/?trackNumber=' + ems + '&openExternalBrowser=1'
+  body.replaceChildren(say('กำลังตรวจสอบสถานะ…')); at.textContent = ''
+  trk.showModal()
+  let d
+  try { d = await (await fetch('/api/track/' + ems)).json() } catch { d = { events: null, stale: true } }
+  if (document.getElementById('trk-h').textContent !== ems) return // ผู้ใช้เปิดเลขอื่นไปแล้ว
+  if (d.error) return body.replaceChildren(say(d.error))
+  if (!d.events) return body.replaceChildren(say('ตรวจสอบสถานะไม่ได้ในขณะนี้ ลองใหม่ภายหลัง หรือดูบนเว็บไปรษณีย์ไทย'))
+  if (!d.events.length) body.replaceChildren(say('ยังไม่มีข้อมูลในระบบไปรษณีย์ — พัสดุอาจยังไม่ได้ฝากส่ง'))
+  else {
+    const ol = document.createElement('ol'); ol.className = 'tl'
+    for (const ev of [...d.events].reverse()) { // ล่าสุดอยู่บน
+      const li = document.createElement('li'), b = document.createElement('b'), s = document.createElement('small')
+      b.textContent = ev.description
+      s.textContent = ev.date.slice(0, 16) + ' · ' + (ev.detail || ev.location || '')
+      li.append(b, s); ol.append(li)
+    }
+    body.replaceChildren(ol)
+  }
+  at.textContent = 'ตรวจสอบเมื่อ ' + fmt(d.checked_at) + (d.stale ? ' (ข้อมูลเก่า)' : '')
 }
 </script></body></html>`)
 })
