@@ -12,6 +12,17 @@ app.set('trust proxy', 'loopback') // อยู่หลัง nginx บนเ�
 const SALT = randomBytes(16).toString('hex')
 const DEDUPE = '30 minutes'
 
+// ปิดท้ายนามสกุล: ยาว ≥4 ตัว → ** , สั้นกว่า → * — นับเป็น grapheme ("ธ์" = 1 ตัว)
+// นามสกุล = ทุกอย่างหลังเว้นวรรคแรก (ข้อมูลดิบบางคนมีวรรคกลางนามสกุล เช่น "วิรัช กุล")
+const graphemes = new Intl.Segmenter('th', { granularity: 'grapheme' })
+const maskName = (full) => {
+  const i = full.indexOf(' ')
+  if (i < 0) return full
+  const g = [...graphemes.segment(full.slice(i + 1))].map((s) => s.segment)
+  const n = g.length <= 3 ? 1 : 2
+  return full.slice(0, i + 1) + g.slice(0, -n).join('') + '*'.repeat(n)
+}
+
 app.get('/api/search', async (req, res) => {
   const q = String(req.query.q ?? '').replace(/[​\s]+/g, ' ').trim()
   if (q.length < 2) return res.status(400).json({ error: 'พิมพ์อย่างน้อย 2 ตัวอักษร' })
@@ -24,7 +35,12 @@ app.get('/api/search', async (req, res) => {
       LIMIT 50`,
     [q.replace(/[\\%_]/g, '\\$&')]
   )
-  res.json(rows)
+  // ไม่ส่งชื่อเต็มออกไป; group แยกคนที่ชื่อ mask แล้วบังเอิญซ้ำกัน
+  const group = new Map()
+  res.json(rows.map(({ full_name, ...r }) => {
+    if (!group.has(full_name)) group.set(full_name, group.size)
+    return { name: maskName(full_name), group: group.get(full_name), ...r }
+  }))
 })
 
 app.get('/', async (req, res) => {
@@ -86,7 +102,8 @@ f.onsubmit = async (e) => {
   if (!r.ok) return msg.textContent = data.error
   msg.textContent = data.length ? 'พบ ' + new Set(data.map((x) => x.ems)).size + ' รายการส่งของ' + (data.length === 50 ? ' (แสดง 50 แรก พิมพ์ให้ละเอียดขึ้น)' : '') : 'ไม่พบชื่อนี้'
   // 1 tbody ต่อชื่อ, 1 แถวต่อกล่อง (EMS), ชื่อ rowspan ครอบทุกกล่องของคนนั้น
-  for (const [name, items] of Map.groupBy(data, (x) => x.full_name)) {
+  for (const items of Map.groupBy(data, (x) => x.group).values()) {
+    const name = items[0].name
     const body = t.createTBody()
     const parcels = Map.groupBy(items, (x) => x.ems)
     for (const [ems, its] of parcels) {
