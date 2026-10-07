@@ -133,10 +133,12 @@ const server = app.listen(port, (err) => {
 })
 
 // pm2 restart/stop ส่ง SIGINT — ต้องปิด PGlite ให้เรียบร้อย ไม่งั้น pgdata เสียได้ (เจอจริงตอน kill -9)
+// postmaster.pid ค้างอยู่เสมอแม้ close ถูก — ดูจาก log "pgdata closed" แทน
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.once(sig, () => {
     server.close(async () => {
       await db.close()
+      console.log(`${sig}: pgdata closed`)
       process.exit(0)
     })
     server.closeAllConnections() // ไม่รอ keep-alive — pm2 จะ SIGKILL หลัง 1.6 วิ
